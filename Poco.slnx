@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Poco.Core/Poco.Core.csproj" />
+    <Project Path="src/Poco.Mono/Poco.Mono.csproj" />
+    <Project Path="src/Poco.Worker/Poco.Worker.csproj" />
+  </Folder>
+</Solution>

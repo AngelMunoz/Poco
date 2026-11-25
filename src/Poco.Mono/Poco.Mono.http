@@ -1,0 +1,80 @@
+@Poco.Mono_HostAddress = http://localhost:5032
+@AgentKey = demo-agent-key
+@AdjusterKey = demo-adjuster-key
+@AdminKey = demo-admin-key
+
+# Demo identities (appsettings.json): agent=quotes+renewals, adjuster=claims,
+# viewer=read-only (no MCP), admin=all. Header on the request line selects who calls.
+
+GET {{Poco.Mono_HostAddress}}/policies
+X-Api-Key: {{AdminKey}}
+Accept: application/json
+
+###
+
+POST {{Poco.Mono_HostAddress}}/quotes
+X-Api-Key: {{AgentKey}}
+Content-Type: application/json
+
+{
+  "holderName": "Dana Novak",
+  "age": 34,
+  "region": "EU",
+  "coverageAmount": 40000,
+  "risk": "Medium"
+}
+
+###
+
+POST {{Poco.Mono_HostAddress}}/claims
+X-Api-Key: {{AdjusterKey}}
+Content-Type: application/json
+
+{
+  "policyId": "11111111-1111-1111-1111-111111111111",
+  "claimedAmount": 18000,
+  "category": "Water damage"
+}
+
+###
+
+GET {{Poco.Mono_HostAddress}}/claims/decisions
+X-Api-Key: {{AdjusterKey}}
+Accept: application/json
+
+###
+
+GET {{Poco.Mono_HostAddress}}/policies/11111111-1111-1111-1111-111111111111/renewal
+X-Api-Key: {{AgentKey}}
+Accept: application/json
+
+###
+
+### MCP (Streamable HTTP on /mcp, McpUse policy + per-tool permissions)
+
+POST {{Poco.Mono_HostAddress}}/mcp
+X-Api-Key: {{AdminKey}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"http-file","version":"1.0"}}}
+
+###
+
+POST {{Poco.Mono_HostAddress}}/mcp
+X-Api-Key: {{AdminKey}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+
+###
+
+POST {{Poco.Mono_HostAddress}}/mcp
+X-Api-Key: {{AgentKey}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"quote_premium","arguments":{"holderName":"Dana Novak","age":34,"region":"EU","coverageAmount":40000,"risk":"Medium"}}}
+
+###
