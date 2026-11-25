@@ -3,9 +3,11 @@ using Poco.Core.Claims;
 using Poco.Core.Issuing;
 using Poco.Core.Policies;
 using Poco.Core.Quoting;
+using Poco.Core.Reviewing;
 using Poco.Core.Renewing;
 using Poco.Worker.Environment;
 using ApproveClaimOp = Poco.Core.Approving.ApproveClaim;
+using ScheduleClaimReviewOp = Poco.Core.Reviewing.ScheduleClaimReview;
 using IssuePolicyOp = Poco.Core.Issuing.IssuePolicy;
 
 namespace Poco.Worker;
@@ -26,7 +28,8 @@ public class Worker(
     LoggingClaimLedger ledger,
     TimeProvider timeProvider,
     ServiceClaimAuthorizer claimAuthorizer,
-    InvoiceBillingGateway billingGateway) : BackgroundService
+    InvoiceBillingGateway billingGateway,
+    WorkerReviewQueue reviewQueue) : BackgroundService
 {
     // Pattern 1 environment: a frozen tariff snapshot taken at startup.
     // Mono resolves tariffs live from config per request; the batch job
@@ -62,7 +65,10 @@ public class Worker(
         do
         {
             RepricePendingQuotes();
-            TriagePendingClaims();
+            await TriagePendingClaimsAsync(stoppingToken);
+            // Queued review jobs are worked on their own schedule — a later
+            // tick than the one that scheduled them, if ever in this demo.
+            reviewQueue.TryProcessNext();
             AssessRenewals();
 
             logger.LogInformation(
@@ -110,7 +116,7 @@ public class Worker(
         }
     }
 
-    private void TriagePendingClaims()
+    private async Task TriagePendingClaimsAsync(CancellationToken stoppingToken)
     {
         while (_pendingClaims.TryDequeue(out var request))
         {
@@ -137,6 +143,23 @@ public class Worker(
                         case ApprovalDenied denied:
                             logger.LogWarning("Approval denied for policy {PolicyId}: {Reason}", decision.PolicyId, denied.Reason);
                             break;
+                    }
+
+                    // Asynchronous by nature: when triage flags manual
+                    // review, the worker does not review anything now. It
+                    // schedules the review and moves on; the receipt is the
+                    // end of this operation.
+                    if (decision.RequiresManualReview)
+                    {
+                        var scheduled = await ScheduleClaimReviewOp.ExecuteAsync(
+                            new ClaimReviewRequest(decision.PolicyId, decision.Payout, "Payout above the manual-review threshold"),
+                            reviewQueue, Guid.NewGuid(), timeProvider, stoppingToken);
+                        if (scheduled is ClaimReviewReceipt receipt)
+                        {
+                            logger.LogInformation(
+                                "Review scheduled as job {JobId} with status {Status} — not reviewed yet, by design",
+                                receipt.JobId, receipt.Status);
+                        }
                     }
                     break;
                 case PolicyNotFound notFound:

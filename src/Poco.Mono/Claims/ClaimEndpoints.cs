@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http.HttpResults;
 using Poco.Core.Approving;
+using Poco.Core.Reviewing;
 using Poco.Core.Claims;
 using Poco.Mono.Hosting;
 using Poco.Mono.Security;
@@ -51,6 +52,24 @@ public static class ClaimEndpoints
             })
             .WithName("ApproveClaim")
             .RequireAuthorization(AuthorizationPolicies.ClaimsApprove);
+
+        // Asynchronous by nature: this returns 202 + a receipt. The review
+        // has NOT happened when this responds; the job waits in the queue.
+        app.MapPost("/claims/schedule-review",
+            async Task<Results<Accepted<ClaimReviewReceipt>, BadRequest<ApiError>>> (
+                ClaimReviewRequest request, CancellationToken cancellationToken) =>
+                await ScheduleClaimReview.ExecuteAsync(
+                    request, environment.ReviewQueue, Guid.NewGuid(), timeProvider, cancellationToken) switch
+                {
+                    ClaimReviewReceipt receipt => TypedResults.Accepted("/claims/review-jobs", receipt),
+                    ReviewSchedulingRejected rejected => TypedResults.BadRequest(new ApiError(rejected.Reason)),
+                })
+            .WithName("ScheduleClaimReview")
+            .RequireAuthorization(AuthorizationPolicies.ClaimsTriage);
+
+        app.MapGet("/claims/review-jobs", () => environment.ReviewQueue.Jobs.ToArray())
+            .WithName("GetClaimReviewJobs")
+            .RequireAuthorization(AuthorizationPolicies.ClaimsRead);
 
         app.MapGet("/claims/approvals", () => ledger.Approvals.ToArray())
             .WithName("GetClaimApprovals")

@@ -1,5 +1,6 @@
 using Poco.Core.Claims;
 using Poco.Worker;
+using Poco.Core.Reviewing;
 using Poco.Worker.Environment;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -14,6 +15,8 @@ builder.Services.AddSingleton<LoggingClaimLedger>();
 builder.Services.AddSingleton<IClaimLedger>(sp => sp.GetRequiredService<LoggingClaimLedger>());
 builder.Services.AddSingleton<ServiceClaimAuthorizer>();
 builder.Services.AddSingleton<InvoiceBillingGateway>();
+builder.Services.AddSingleton<WorkerReviewQueue>();
+builder.Services.AddSingleton<IReviewJobQueue>(sp => sp.GetRequiredService<WorkerReviewQueue>());
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddHostedService<Worker>();
 

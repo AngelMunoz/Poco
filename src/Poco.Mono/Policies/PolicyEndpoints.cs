@@ -4,6 +4,7 @@ using Poco.Core.Issuing;
 using Poco.Core.Policies;
 using Poco.Core.Quoting;
 using Poco.Core.Renewing;
+using Poco.Core.Verifying;
 using Poco.Mono.Claims;
 using Poco.Mono.Hosting;
 using Poco.Mono.Security;
@@ -48,6 +49,21 @@ public static class PolicyEndpoints
             })
             .WithName("AssessRenewal")
             .RequireAuthorization(AuthorizationPolicies.RenewalsAssess);
+
+        // Asynchronous in implementation, synchronous in meaning: the
+        // registry lookup takes time, but the response is the final answer.
+        app.MapGet("/policies/{id:guid}/verify",
+            async Task<Results<Ok<PolicyCoverage>, BadRequest<ApiError>, NotFound>> (
+                Guid id, decimal amount, CancellationToken cancellationToken) =>
+                await VerifyPolicyCoverage.ExecuteAsync(
+                    id, amount, environment.PolicyRegistry, cancellationToken) switch
+                {
+                    PolicyCoverage coverage => TypedResults.Ok(coverage),
+                    PolicyNotFoundResult => TypedResults.NotFound(),
+                    CoverageRejected rejected => TypedResults.BadRequest(new ApiError(rejected.Reason)),
+                })
+            .WithName("VerifyPolicyCoverage")
+            .RequireAuthorization(AuthorizationPolicies.PoliciesRead);
 
         // Contract-based operation: Core charges through Mono's billing
         // contract, then persists through the policy store (which fulfils

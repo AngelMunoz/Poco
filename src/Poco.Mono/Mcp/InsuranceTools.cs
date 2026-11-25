@@ -7,12 +7,14 @@ using Poco.Core.Approving;
 using Poco.Core.Claims;
 using Poco.Core.Policies;
 using Poco.Core.Quoting;
+using Poco.Core.Reviewing;
 using Poco.Core.Renewing;
 using Poco.Mono.Claims;
 using Poco.Mono.Policies;
 using Poco.Mono.Security;
 using QuotePremiumOp = Poco.Core.Quoting.QuotePremium;
 using ApproveClaimOp = Poco.Core.Approving.ApproveClaim;
+using ScheduleClaimReviewOp = Poco.Core.Reviewing.ScheduleClaimReview;
 using TriageClaimOp = Poco.Core.Claims.TriageClaim;
 using AssessRenewalOp = Poco.Core.Renewing.AssessRenewal;
 
@@ -39,7 +41,8 @@ public sealed class InsuranceTools(
     IReadOnlyDictionary<string, decimal> tariffs,
     IReadOnlyDictionary<Guid, decimal> currentPremiums,
     IHttpContextAccessor httpContextAccessor,
-    IClaimAuthorizer claimAuthorizer)
+    IClaimAuthorizer claimAuthorizer,
+    IReviewJobQueue reviewQueue)
 {
     [McpServerTool(Name = "quote_premium")]
     [Description("Price an insurance quote. Returns the issued quote; errors when the request is rejected.")]
@@ -131,6 +134,25 @@ public sealed class InsuranceTools(
         };
     }
 
+    [McpServerTool(Name = "schedule_claim_review")]
+    [Description("Schedule a human review for a claim. Returns a queued receipt — the review itself happens later, not inside this call.")]
+    public async Task<string> ScheduleClaimReview(
+        [Description("Id of the policy whose claim needs review.")] Guid policyId,
+        [Description("Payout amount to review.")] decimal payout,
+        [Description("Why this claim needs a human review.")] string reason,
+        CancellationToken cancellationToken = default)
+    {
+        Require(Permissions.ClaimsTriage);
+
+        return await ScheduleClaimReviewOp.ExecuteAsync(
+            new ClaimReviewRequest(policyId, payout, reason),
+            reviewQueue, Guid.NewGuid(), timeProvider, cancellationToken) switch
+        {
+            ClaimReviewReceipt receipt => JsonSerializer.Serialize(receipt, McpJsonContext.Default.ClaimReviewReceipt),
+            ReviewSchedulingRejected rejected => throw new McpException(rejected.Reason),
+        };
+    }
+
     [McpServerTool(Name = "list_policies")]
     [Description("List all policies known to this host.")]
     public string ListPolicies()
@@ -167,6 +189,7 @@ public sealed class InsuranceTools(
 [JsonSerializable(typeof(Quote))]
 [JsonSerializable(typeof(ClaimDecision))]
 [JsonSerializable(typeof(ClaimApproval))]
+[JsonSerializable(typeof(ClaimReviewReceipt))]
 [JsonSerializable(typeof(RenewalOffer))]
 [JsonSerializable(typeof(Policy[]))]
 [JsonSerializable(typeof(ClaimDecision[]))]

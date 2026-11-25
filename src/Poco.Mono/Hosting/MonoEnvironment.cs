@@ -2,6 +2,8 @@ using System.Globalization;
 using Poco.Core.Approving;
 using Poco.Core.Claims;
 using Poco.Core.Issuing;
+using Poco.Core.Reviewing;
+using Poco.Core.Verifying;
 using Poco.Mono.Claims;
 using Poco.Core.Policies;
 using Poco.Mono.Policies;
@@ -21,7 +23,9 @@ public sealed record MonoEnvironment(
     IReadOnlyDictionary<Guid, decimal> CurrentPremiums,
     TimeProvider TimeProvider,
     IClaimAuthorizer ClaimAuthorizer,
-    IBillingGateway BillingGateway);
+    IBillingGateway BillingGateway,
+    InMemoryReviewQueue ReviewQueue,
+    SimulatedPolicyRegistry PolicyRegistry);
 
 public static class MonoEnvironmentRegistration
 {
@@ -78,8 +82,17 @@ public static class MonoEnvironmentRegistration
         builder.Services.AddSingleton<IBillingGateway>(billingGateway);
         builder.Services.AddSingleton<IPolicyRepository>(policies);
 
+        // Asynchronous operations' environment: a queue that accepts jobs
+        // for later (nothing is processed inline), and a registry whose
+        // lookups take time, simulated with a small delay.
+        var reviewQueue = new InMemoryReviewQueue();
+        var policyRegistry = new SimulatedPolicyRegistry(policies);
+        builder.Services.AddSingleton<IReviewJobQueue>(reviewQueue);
+        builder.Services.AddSingleton<IAsyncPolicyRegistry>(policyRegistry);
+        builder.Services.AddSingleton(reviewQueue);
+
         return new MonoEnvironment(
             policies, ledger, tariffs, currentPremiums, TimeProvider.System,
-            claimAuthorizer, billingGateway);
+            claimAuthorizer, billingGateway, reviewQueue, policyRegistry);
     }
 }

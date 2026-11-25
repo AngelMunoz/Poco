@@ -5,6 +5,8 @@ using Poco.Core.Issuing;
 using Poco.Core.Policies;
 using Poco.Core.Quoting;
 using Poco.Core.Renewing;
+using Poco.Core.Reviewing;
+using Poco.Core.Verifying;
 
 using Poco.Mono.Claims;
 
@@ -24,6 +26,10 @@ public sealed record ApiError(string Error);
 [JsonSerializable(typeof(ClaimApproval))]
 [JsonSerializable(typeof(ClaimApproval[]))]
 [JsonSerializable(typeof(ApproveClaimBody))]
+[JsonSerializable(typeof(ClaimReviewRequest))]
+[JsonSerializable(typeof(ClaimReviewReceipt))]
+[JsonSerializable(typeof(ClaimReviewJob[]))]
+[JsonSerializable(typeof(PolicyCoverage))]
 [JsonSerializable(typeof(ApiError))]
 internal partial class AppJsonSerializerContext : JsonSerializerContext
 {

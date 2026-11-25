@@ -1,0 +1,30 @@
+server:
+  port: 5033
+
+spring:
+  application:
+    name: Poco.Api
+
+# Demo identities and tariffs. Production keys never live in config like
+# this; the demo handler exists so the security model is easy to inspect.
+poco:
+  tariffs:
+    EU-Low: 0.020
+    EU-Medium: 0.035
+    EU-High: 0.060
+    US-Low: 0.025
+    US-Medium: 0.040
+    US-High: 0.070
+  demo-identities:
+    demo-agent-key:
+      name: agent
+      permissions: [quotes:create, policies:read, renewals:assess, policies:issue, mcp:use]
+    demo-adjuster-key:
+      name: adjuster
+      permissions: [claims:triage, claims:read, policies:read, claims:approve, mcp:use]
+    demo-viewer-key:
+      name: viewer
+      permissions: [policies:read, claims:read]
+    demo-admin-key:
+      name: admin
+      permissions: [quotes:create, claims:triage, claims:read, policies:read, renewals:assess, policies:issue, claims:approve, claims:approve:large, mcp:use]

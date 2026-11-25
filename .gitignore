@@ -485,3 +485,14 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Gradle / JVM (the jvm/ build has its own .gitignore too; these keep the root tidy)
+.gradle/
+jvm/**/build/
+**/.kotlin/
+out/
+hs_err_pid*
+replay_pid*
+.classpath
+.project
+.settings/

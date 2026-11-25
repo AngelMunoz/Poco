@@ -1,323 +1,172 @@
-# Poco: one small insurance library, used three ways
+# Poco: one insurance library, used by an API, agents, and a worker
 
-This repo is a learning example. It shows how one library of business rules
-can be used by a web API, by AI agents (through MCP), and by a background
-worker — without the library knowing anything about HTTP, agents, or workers.
+This repo is a learning example about *sharing business rules without
+sharing infrastructure*. A small made-up insurance business (quotes,
+claims, renewals, approvals, issuing policies) is written once as a plain
+library. A web API, AI agents, and a background worker all use that
+library — and none of them forces its way of working on the others.
 
-The business is made-up insurance: pricing a quote, triaging a claim,
-checking a renewal, approving a claim, and issuing a policy.
+The demo is implemented twice, with the same scope and the same acceptance
+checks, so the ideas can be compared across ecosystems:
 
-## Try it first
-
-```bash
-dotnet build Poco.slnx
-
-# Web API on http://localhost:5032 (example requests are in src/Poco.Mono/Poco.Mono.http)
-dotnet run --project src/Poco.Mono/Poco.Mono.csproj
-
-# Background worker (works through a small queue every 5 seconds, watch the log)
-dotnet run --project src/Poco.Worker/Poco.Worker.csproj
-```
-
-Most examples need an `X-Api-Key` header. These demo keys are in
-`src/Poco.Mono/appsettings.json` — use them only for this demo:
-
-| Key | Who it pretends to be | Can do |
+| Implementation | Where | Start with |
 |---|---|---|
-| `demo-agent-key` | Sales agent | Quotes, renewals, issue policies, MCP |
-| `demo-adjuster-key` | Claims adjuster | Triage and approve claims, MCP |
-| `demo-viewer-key` | Read-only viewer | Look at policies and claim decisions |
-| `demo-admin-key` | Admin | Everything, including large claim approvals |
+| .NET / C# | `src/` | [`src/README.md`](src/README.md) |
+| JVM / Kotlin | `jvm/` | [`jvm/README.md`](jvm/README.md) |
 
-## The three projects
+This root document is about the ideas, which are language-agnostic. Each
+language folder explains its own tooling, idioms, and trade-offs.
 
-```
-src/
-├── Poco.Core/      The business rules. A plain library, no web code at all.
-│   ├── Policies/   One shared record: Policy
-│   ├── Quoting/    QuotePremium — work out a premium
-│   ├── Claims/     TriageClaim — decide what a claim pays
-│   ├── Renewing/   AssessRenewal — can this policy renew, and for how much?
-│   ├── Approving/  ApproveClaim — may this payout be approved?
-│   └── Issuing/    IssuePolicy — turn a quote into a policy
-├── Poco.Mono/      The web API (also serves the MCP tools for agents)
-└── Poco.Worker/    A background service that runs the same rules on a timer
-```
+## Run each project
 
-Both apps reference `Poco.Core`. That is the whole trick — the rest of this
-document explains how the sharing works without turning into a mess.
+Prerequisites: .NET 11 SDK for the `src/` side, JDK 21 for the `jvm/` side
+(Gradle wrapper included there). Business routes on both APIs need an
+`X-Api-Key` demo header (`demo-agent-key`, `demo-adjuster-key`,
+`demo-viewer-key`, `demo-admin-key`); APIs also serve MCP at `POST /mcp`.
+
+| Project | Run (from repo root) | Test / inspect at |
+|---|---|---|
+| .NET API + MCP | `dotnet run --project src/Poco.Mono/Poco.Mono.csproj` | Spec: `http://localhost:5032/openapi/v1.json` (Development only). Requests: `src/Poco.Mono/Poco.Mono.http` |
+| .NET Worker | `dotnet run --project src/Poco.Worker/Poco.Worker.csproj` | Console log only — it schedules and processes work on a 5s tick |
+| JVM API + MCP | `cd jvm && ./gradlew :poco-api:bootRun` | Swagger UI: `http://localhost:5033/swagger-ui.html` · Spec: `http://localhost:5033/v3/api-docs` |
+| JVM Worker | `cd jvm && ./gradlew :poco-worker:run` | Console log only, same 5s tick |
+
+Two testing notes:
+
+- The JVM API ships Swagger UI, so it is the quickest way to click through
+  the routes. Spec and UI are public on purpose; business routes still
+  return 401/403 without the right key.
+- The .NET API ships the OpenAPI document but no built-in UI. Feed
+  `/openapi/v1.json` to your favourite client (Postman, Insomnia, VS Code
+  REST Client with the included `.http` file), which renders the same
+  contract. Both documents currently list the identical 11 paths.
 
 ## The main idea, in plain words
 
-**Core never fetches anything itself. The caller brings what the rule needs.**
+**The library never fetches anything itself. The caller brings what the
+rule needs.**
 
-Think of a Core operation like a recipe that says "give me the current
-tariff rate and today's date, and I will price this quote". The recipe does
-not open a database, read a config file, or check the clock itself.
-Whoever calls it — an HTTP endpoint, a worker, a test — supplies those
-things. That is why the same recipe works everywhere: each caller supplies
-things in its own way.
+Think of a pricing rule as a recipe: "give me the current tariff rate and
+today's date, and I will price this quote". The recipe does not open a
+database, read a config file, or check the clock. Whoever calls it — an
+HTTP endpoint, a worker, an agent tool, a test — supplies those things in
+its own way. That is why the same recipe works everywhere.
 
 Every call follows the same three steps:
 
 ```
 1. The caller gathers inputs       HTTP body, queue item, config, database…
-2. It calls one Core operation     QuotePremium.Execute(...), TriageClaim.Execute(...)
-3. It translates the result back   HTTP 200/400/404, a log line, an MCP reply…
+2. It calls one library operation  price this quote, triage this claim…
+3. It translates the result back   HTTP 200/400/404, a log line, an agent reply…
 ```
 
-Step 1 and 3 are different in every app. Step 2 is shared. Code that does
-steps 1 and 3 is called an *adapter* here. Adapters should stay thin: if an
-adapter starts containing a business rule ("premiums double for young
-drivers"), that rule belongs in Core so the other callers get it too.
+Steps 1 and 3 differ per caller. Step 2 is shared. Code doing steps 1 and
+3 is called an *adapter* here, and adapters should stay thin: if an adapter
+grows a business rule, that rule belongs in the library so every caller
+gets it.
 
-A few words used below:
+## Seven operations, four ways to supply what they need
 
-- **Composition root** — the place where an app builds its objects and hands
-  them to the code that needs them. Here that is mostly `Program.cs`.
-- **Contract** — a promise about shape, usually an interface: "give me any
-  object that can find a policy by id". How the object does it is its own
-  business.
-- **Union** — a type that can be one of a fixed list of results. Explained
-  with an example further down.
-- **Policy (authorization)** — a named rule like "this endpoint needs the
-  `claims:triage` permission".
-
-## Walkthrough 1: the same pricing, two callers
-
-`QuotePremium` in `src/Poco.Core/Quoting/QuotePremium.cs` is a plain
-function. It needs four ready-made values:
-
-```csharp
-QuotePremium.Execute(request, tariffRate, quoteId, quotedAt)
-```
-
-The web API looks the tariff up in `appsettings.json` for each request, uses
-`Guid.NewGuid()` and the current time. The worker looks the tariff up in a
-fixed table it captured at startup and uses its own clock. Both then get
-the same answer for the same input — for example, Dana Novak, 34, EU,
-40,000 coverage, medium risk always costs **1,400.00**, in the API response
-and in the worker log. If the two apps ever disagree, the difference is in
-what they passed in, and you can see those values in each app's setup code.
-
-## Walkthrough 2: when a rule needs more than values
-
-Triaging a claim needs to *look up a policy* and *record the decision*.
-That is not a value you can compute first, so `TriageClaim` asks for two
-objects instead:
-
-```csharp
-TriageClaim.Execute(request, policies, ledger, timeProvider)
-```
-
-`policies` and `ledger` are interfaces defined in Core
-(`IPolicyStore`, `IClaimLedger`). Core defines what they must be able to
-do; each app writes its own version:
-
-- The API keeps policies in an in-memory list and records decisions in
-  another list, so it can show them at `GET /claims/decisions`.
-- The worker keeps its own list (a snapshot from startup) and its ledger
-  adds up a running total and writes each decision to the log.
-- A real app would write a version backed by EF Core, Dapper, or a file.
-  Core would not change at all, because it only ever talks to the interface.
-
-## Four ways to hand things to a Core operation
-
-The operations use four styles, from simplest to most structured. Pick the
-simplest one that fits — you can always move up later.
-
-| Style | Example | Use it when |
+| Operation | What it does | What the caller supplies |
 |---|---|---|
-| Just values | `QuotePremium(request, tariffRate, id, time)` | The caller can work the value out first. Easiest to test: same input, same output, every time. |
-| A function (delegate) | `AssessRenewal(policy, premium, id => ..., () => ...)` | The rule needs one small question answered, like "how many claims does this policy have?" Passing a lambda is less work than writing a class. |
-| An object (interface) | `TriageClaim(request, IPolicyStore, IClaimLedger, ...)` | The dependency holds state or is shared by several operations — a store with a cache, a ledger that accumulates, a clock you want to fake in tests. |
-| Contracts you implement | `ApproveClaim`, `IssuePolicy` (next section) | Same as above, but the operation is built around the interfaces: the interface *is* the deal between Core and your app. |
+| Price a quote | Works out a premium | Plain values (tariff rate, id, time) |
+| Triage a claim | Decides the payout | Stateful objects (a policy store, a ledger, a clock) |
+| Assess a renewal | Offers or declines a renewal premium | One small function ("how many recent claims?") |
+| Approve a claim | Decides whether a payout may be approved | A contract: "may this approver approve this amount?" |
+| Issue a policy | Charges, then saves a policy | Contracts: billing and policy storage |
+| Schedule a claim review | Starts a human review — and stops there | A queue contract; returns a receipt, not a result |
+| Verify coverage | Answers "is this covered, and how much?" | An async lookup contract; returns the final answer |
 
-Rule of thumb: start with values. If you find yourself passing a value that
-was painful to compute, or the same two objects to three operations, that
-is a sign to use an interface. If it is just one quick lookup, a lambda is
-probably enough.
+The last two make a distinction worth keeping straight. *Asynchronous by
+nature* means the work is not finished when the call returns: scheduling a
+review only enqueues it (web adapters answer 202 Accepted with a receipt,
+and the result type deliberately has no "reviewed" case to misread).
+*Asynchronous only in implementation* means the call may wait on I/O, but
+when it completes you hold the final answer — verify-coverage is a plain
+question with an async pipe. Whether a call is async is plumbing; whether
+the work is done when it returns is the design decision.
 
-## Results: one of a few named answers (unions)
+The pattern is to use the simplest supply style that fits: values first,
+then a small function, then an object with a lifetime, then a named
+contract (an interface) when the dependency is a capability several
+operations share.
 
-Operations do not throw exceptions for normal business outcomes, and they
-do not return `null` to mean "no". They return a *union*: exactly one of a
-fixed list of results, written with the C# 15 `union` keyword:
+Two ideas make this safe to evolve:
 
-```csharp
-public union ClaimOutcome(ClaimDecision, ClaimRejected, PolicyNotFound);
-```
-
-Read it as: triaging a claim ends in a decision, a rejection, or "policy
-not found". Callers handle the result with a `switch`, and the compiler
-checks that every case is handled:
-
-```csharp
-TriageClaim.Execute(...) switch
-{
-    ClaimDecision decision => TypedResults.Ok(decision),        // → HTTP 200
-    PolicyNotFound         => TypedResults.NotFound(),          // → HTTP 404
-    ClaimRejected rejected => TypedResults.BadRequest(...),     // → HTTP 400
-};
-```
-
-Why this helps:
-
-- The possible outcomes are written down in one place, in business words.
-- You cannot forget a case: remove one line above and the build complains.
-  When Core later adds a new case, every caller complains until it handles
-  it. That is how a change in the library safely reaches all its users.
-- Bad states are hard to build by accident: a declined renewal has no
-  premium field at all, instead of a premium that is `null` plus a boolean
-  you have to keep in sync.
-
-Unions are used inside the process only. At the edges (HTTP, MCP, logs),
-the adapter translates each case into that world's format, as above.
-
-## Contract-based operations: the interface is the deal
-
-Two operations are built entirely around interfaces that *your* app
-implements:
-
-| Operation | Core asks your app for | The API does it by | The worker does it by |
-|---|---|---|---|
-| `ApproveClaim` | "May this person approve this amount?" (`IClaimAuthorizer`), "record this approval" (`IApprovalLedger`) | Checking the logged-in caller's permissions | Checking a service allow-list with a small auto-approve limit |
-| `IssuePolicy` | "Charge this much" (`IBillingGateway`), "save this policy" (`IPolicyRepository`) | A demo card gateway; the same in-memory store used for lookups | Monthly invoicing; its snapshot store |
-
-This is the part to show a sceptical team-mate. Core asks
-`CanApprove("adjuster", 25_000)` and accepts yes or no. It does not know —
-and cannot see — whether your app answered from ASP.NET permission claims,
-a config allow-list, a database of underwriters, or a test stub that always
-says yes. The interface is the contract; how you fulfil it is your choice.
-
-That also answers the common worry, "but our app does authorization its own
-way". Good — that is where authorization belongs. It stays in your app,
-behind the interface, and Core stays reusable.
-
-Small detail worth copying: one class can fulfil several contracts. The
-API's `InMemoryPolicyStore` is both the lookup store (triage) and the
-repository (issue). You do not need one class per interface unless you
-want one.
+- **Results are one of a few named answers.** Triage ends in a decision, a
+  rejection, or "not found" — never `null`, never an exception for a normal
+  outcome. Callers must handle every case, and in both languages the
+  compiler checks that they do. Add a case, and every caller that has not
+  handled it stops compiling. In a monorepo, that is most of the safety
+  you need.
+- **Contracts say what, never how.** "May this approver approve 25,000?"
+  is answered by the API from the caller's permissions, by the worker
+  from a service allow-list with a lower limit, and by a test with a
+  one-line stub. The library cannot tell the difference, by design.
 
 ## Who is allowed to do what
 
-Two different questions, often mixed up:
+Authentication (who is calling?) and authorization (what may they do?)
+are checked by each *caller-facing* app, never inside the library:
 
-- **Authentication**: who is calling? (Here: which demo API key was sent?)
-- **Authorization**: what is that caller allowed to do? (Here: named
-  policies, each needing one `permission` claim, set in `Security/`.)
+- API callers and agents present a credential and get named permissions
+  (for example `claims:triage`). No credential → 401; a credential without
+  the needed permission → 403.
+- The worker has no caller, and that is fine. It works under its own
+  service identity, with access only to what it needs. If a person started
+  a job, the API checks their permission *before* enqueueing and stamps
+  the job with who asked and which customer it belongs to; the worker then
+  stays inside that boundary. It never replays a user's credential.
+- Limits that are business rules rather than permissions (a large claim
+  always needs a human) live in the library's results, so they hold for
+  every caller, including the worker.
 
-The API checks authorization on each endpoint, for example `POST /claims`
-needs `ClaimsTriage` and `GET /policies` needs `PoliciesRead`. No key at
-all gets a 401; a valid caller without the permission gets a 403.
+Agents are not special: an agent is another caller with its own credential
+and usually narrower permissions, reaching the same operations through
+MCP tools that behave like extra endpoints.
 
-Notice how approval shows both layers working together:
+## Running the whole thing locally
 
-1. The endpoint policy is the front gate: callers without `claims:approve`
-   cannot call `POST /claims/approve` at all.
-2. Inside, the app's authorizer makes the detailed call: the adjuster may
-   approve 17,500 but not 25,000, because only the admin also has
-   `claims:approve:large`.
+Both implementations run fine as plain processes, which is how the demo
+stays small. When real dependencies arrive (a database, a queue, a second
+service), orchestration becomes the next question. The .NET side's answer
+is **Aspire**: one AppHost models projects plus Docker/Podman containers,
+wires configuration and service discovery, and gives every resource one
+dashboard for logs, traces, and metrics. The JVM side answers with
+**Docker/Podman Compose + Testcontainers**, and can also be orchestrated
+by Aspire itself through its Java hosting integration. Details, sketches,
+and trade-offs are in each language README.
 
-In production you would swap the demo key handler for JWT/OIDC login in
-`Security/MonoSecurity.cs`. The policies and endpoints would not change,
-because they only look at the resulting claims.
+## Which ecosystem should you pick?
 
-### What about the worker? It has no caller
+Both implementations are deliberately equivalent, so the choice is about
+your team and your machines, not about features. The root README stays out
+of ecosystem advocacy; each language folder argues its own case
+([.NET](src/README.md), [JVM](jvm/README.md)).
 
-That is correct, and it is fine. The worker is not serving a user, so it
-does not need user permissions. It works as *itself*:
+One comparison does belong here, because it affects day-to-day work in
+constrained *development* environments — cloud dev boxes and VDI desktops
+where RAM and CPU are shared and nothing is fast:
 
-- Give the worker its own identity (a service account or managed identity)
-  that can only reach the queues and tables it needs, separate from the
-  API's credentials.
-- If a person started the job, decide "may they ask for this?" in the API
-  *before* enqueueing, and stamp the job with who asked and which customer
-  (tenant) it belongs to. The worker then only touches that customer's
-  data — in this design, by being handed a store limited to that tenant.
-- Some limits are business rules, not permissions, so they live in Core:
-  a claim above the manual-review threshold is never auto-approved, whoever
-  runs the operation. You saw this in the worker log: it triages a 17,500
-  payout and leaves the approval to a human.
+| Dev-time question | .NET / C# | JVM / Kotlin |
+|---|---|---|
+| Edit → rebuild loop | Fast incremental builds, no permanent daemon | Fast when the Gradle/Kotlin daemons are warm; cold starts are slow |
+| Memory while developing | One SDK, lightweight compiler server | Gradle daemon + Kotlin daemon + the app JVM — budget a few hundred MB each |
+| Restarting the app | Quick; `dotnet watch` reloads many edits without a restart | Spring context restart per change unless you add dev tooling |
+| Ahead-of-time builds | Available, but slow — a release step, not a dev step | Native image, same warning: keep it out of the edit loop |
 
-## MCP tools for agents: the same pattern, one more time
+Short version: on a constrained dev machine the .NET loop is usually the
+more comfortable one, mostly because it carries no heavyweight build
+daemons. The JVM loop is perfectly workable if you keep the daemons warm,
+build only the module you touched, and test library changes without
+booting the whole API. Both language READMEs give concrete numbers and
+tips from running these exact projects.
 
-Agents call the tools in `src/Poco.Mono/Mcp/InsuranceTools.cs` at
-`POST /mcp` (`quote_premium`, `triage_claim`, `assess_renewal`,
-`approve_claim`, `list_policies`, `list_claim_decisions`). Each tool is a
-small adapter, exactly like an HTTP endpoint: check the caller's
-permission, gather inputs, call the same Core operation, translate the
-result. An agent is just another caller with its own key and permissions —
-connecting requires `mcp:use`, and each tool re-checks the permission its
-HTTP counterpart needs, so an agent that may quote still cannot approve
-claims.
+## Deliberate simplifications (both implementations)
 
-## Add your own operation (step by step)
-
-Say you want a rule "Is this customer eligible for premium (pay-monthly)
-billing?" that both apps can use.
-
-1. **One new file in Core**, e.g. `Billing/CheckBillingEligibility.cs`, with:
-   the input record, the result records plus a `union`, and one static
-   `Execute` method holding the rule.
-2. **Decide what the rule needs from outside**, using the table above:
-   values if you can, a lambda for one lookup, an interface if it is a
-   shared capability. Keep the interface small — only the methods this
-   operation actually uses.
-3. **One thin adapter per caller**: in the API, an endpoint that gathers
-   inputs, calls `Execute`, and switches over every union case to pick a
-   status code; in the worker, a few lines in the batch that do the same
-   and log the result. No rule logic in either adapter.
-4. **Write the fulfilments your app needs** (a class implementing the new
-   interface, or a lambda), and register/pass them in that app's setup.
-   The other app does the same in its own way.
-
-That is all. If step 2 feels forced, it usually means the rule needs less
-from the outside than you first thought — try passing plain values first.
-
-## Why this can work (the short version)
-
-- **Changes are caught by the compiler.** Add a case to a union, or a
-  method to a contract, and every caller that must react stops building
-  until it does. In a monorepo, that is most of the safety you need.
-- **Each app owns its own lifetime choices.** The API can create things per
-  request, the worker keeps singletons for its whole run, and Core never
-  notices, because Core constructs nothing and stores nothing.
-- **Testing Core is cheap.** Most operations are functions with explicit
-  inputs, so a test is just: call with known values, check the result case.
-  No web server, no database, no container setup:
-
-  ```csharp
-  var outcome = QuotePremium.Execute(
-      new QuoteRequest("Dana Novak", 34, "EU", 40_000m, RiskLevel.Medium),
-      tariffRate: 0.035m, Guid.NewGuid(), DateTimeOffset.UtcNow);
-  // outcome is a Quote with AnnualPremium 1400.00
-  ```
-
-- **The boundary stays honest.** Dependencies are parameters, so what an
-  operation needs is visible in its signature. If a signature gets long,
-  that is useful feedback about the design, not something to hide.
-
-## Common mistakes to avoid
-
-- **Putting infrastructure in Core** (a DbContext, `HttpContext`, a logger,
-  config reading). The moment Core does that, one caller inherits another
-  caller's setup — usually the worker inheriting web stuff it cannot use.
-- **Registering services from Core** (an `AddPocoCore()` method). Lifetimes
-  and scopes differ per app; let each app register its own implementations.
-- **Writing business rules in adapters.** If the API and the worker must
-  agree on it, it belongs in Core; adapters only translate.
-- **Adding a catch-all to a union switch** (`_ => ...`). It silences the
-  compiler warning that is supposed to protect you when cases change.
-- **Checking permissions inside Core.** Core can *ask* a contract
-  ("may this approver approve?"); the app's answer, based on its own auth,
-  is where the check lives.
-
-## Deliberate simplifications in this demo
-
-Data is in-memory and resets on restart; demo keys sit in `appsettings.json`;
-the worker's queue is a seeded list in code; billing is pretend. Each of
-those is a fulfilment detail inside one app, so replacing any of them
-(a real database, real login, a real queue, a real payment provider)
-changes one app's implementation classes and leaves Core and the other
-app untouched. That replaceability is the point of the exercise.
+Data is in-memory and resets on restart; demo keys sit in config;
+billing is pretend; the worker's queue is a seeded list. Each of those is
+a fulfilment detail inside one app, so replacing any of them (a real
+database, real login, a real queue, a real payment provider) changes one
+app's implementation classes and leaves the library and the other apps
+untouched. That replaceability is the point of the exercise.
